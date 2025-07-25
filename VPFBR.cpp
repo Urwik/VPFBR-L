@@ -16,6 +16,7 @@
 #include <pcl/common/transformation_from_correspondences.h>
 #include <ceres/ceres.h>
 #include <ceres/rotation.h>
+#include <ceres/version.h>
 #include <eigen3/Eigen/Dense>
 #include <pcl/kdtree/kdtree_flann.h>
 
@@ -99,7 +100,7 @@ typedef struct pair_point
 typedef pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> ColorHandlerT;
 
 // point cloud down sampling
-float LeafSize = 0.2;
+float LeafSize = 0.02;
 
 // parameter for plane feature extraction and fusion
 // l and k
@@ -111,7 +112,7 @@ float parameter_k2 = 2.0;
 float normal_vector_threshold1 = 5.0;
 float normal_vector_threshold2 = 8.0;
 // voxel size
-float face_voxel_size = 1.0;
+float face_voxel_size = 0.05;
 // if the point in voxel is less than this value, it will not be processed
 float voxel_point_threshold = 5;
 // threshold of plane curvature
@@ -185,11 +186,17 @@ void ceres_refine(Eigen::Matrix4f &new_transformation_matrix, std::vector<pair_f
 {
 	double para_q[4] = {0, 0, 0, 1};
 	double para_t[3] = {0, 0, 0};
-	ceres::LocalParameterization *q_parameterization =
-		new ceres::EigenQuaternionParameterization();
+
 	ceres::Problem::Options problem_options;
 	ceres::Problem problem(problem_options);
-	problem.AddParameterBlock(para_q, 4, q_parameterization);
+
+	#if CERES_VERSION_MAJOR < 2
+		ceres::LocalParameterization *q_parameterization = new ceres::EigenQuaternionParameterization();
+	#else 
+		ceres::Manifold *q_parameterization = new ceres::EigenQuaternionManifold();
+		problem.AddParameterBlock(para_q, 4, q_parameterization);
+	#endif
+
 	problem.AddParameterBlock(para_t, 3);
 	for (auto it1 = pair_face_vecter.begin(); it1 != pair_face_vecter.end(); it1++)
 	{
@@ -377,7 +384,7 @@ void face_extrate(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_src, std::vector<fac
 	pcl::PointCloud<pcl::Normal>::Ptr cloud_normals(new pcl::PointCloud<pcl::Normal>);
 	pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_centroid(new pcl::PointCloud<pcl::PointXYZ>);
 	std::vector<voxelnode> voxel_vector;
-	for (int i = 0; i < vec.size(); i++)
+	for (std::size_t i = 0; i < vec.size(); i++)
 	{
 		std::vector<int> pointIdxVec;
 		if (octree.voxelSearch((*(vec.begin() + i)), pointIdxVec))
@@ -686,7 +693,7 @@ float fine_verify(Eigen::Matrix4f &transformation_matrix, pcl::PointCloud<pcl::P
 	float threash_num = 1;
 	float similar_num = 0;
 	float allinvec = 0;
-	for (int i = 0; i < vec.size(); i++)
+	for (std::size_t i = 0; i < vec.size(); i++)
 	{
 		std::vector<int> pointIdxVec;
 		float source_num = 0;
@@ -730,44 +737,42 @@ float fine_verify(Eigen::Matrix4f &transformation_matrix, pcl::PointCloud<pcl::P
 
 void computer_transform(std::vector<Eigen::Matrix4f> &transformation_vecter, int index11, int index12, int index21, int index22, std::vector<facenode> &face_vecter1, std::vector<facenode> &face_vecter2)
 {
+	// 1 = source, 2 = target
+
 	Eigen::Matrix4f transformation_matrix = Eigen::Matrix4f::Identity();
 
-	// Compute the rotation axis "r1" Eq. (6)
 	Eigen::Vector3f n1 = Eigen::Vector3f(face_vecter1[index11].average_normal_x, face_vecter1[index11].average_normal_y, face_vecter1[index11].average_normal_z);
 	Eigen::Vector3f m1 = Eigen::Vector3f(face_vecter1[index12].average_normal_x, face_vecter1[index12].average_normal_y, face_vecter1[index12].average_normal_z);
 	Eigen::Vector3f n2 = Eigen::Vector3f(face_vecter2[index21].average_normal_x, face_vecter2[index21].average_normal_y, face_vecter2[index21].average_normal_z);
 	Eigen::Vector3f m2 = Eigen::Vector3f(face_vecter2[index22].average_normal_x, face_vecter2[index22].average_normal_y, face_vecter2[index22].average_normal_z);
+
+	// ### R1, rotation around n2.cross(n1)
 	Eigen::Vector3f r1 = n2.cross(n1);
 	r1.normalize();
-	Eigen::Matrix3f r1x = Eigen::Matrix3f::Identity();
+	Eigen::Matrix3f r1x = Eigen::Matrix3f::Identity(); // Skew-symmetric matrix of r1
 	r1x(0, 0) = 0; 		r1x(0, 1) = -r1[2]; 	r1x(0, 2) = r1[1];
 	r1x(1, 0) = r1[2]; 	r1x(1, 1) = 0; 			r1x(1, 2) = -r1[0];
 	r1x(2, 0) = -r1[1]; r1x(2, 1) = r1[0];		r1x(2, 2) = 0;
 
 	Eigen::Matrix3f I = Eigen::Matrix3f::Identity();
 	Eigen::Matrix3f R1 = Eigen::Matrix3f::Identity();
-	float n2dn1 = n2.dot(n1);
-	Eigen::Vector3f r1cn2 = r1.cross(n2);
-	float r1cn2dn1 = r1cn2.dot(n1);
+	float n2dn1 = n2.dot(n1); 				// projection of n1 on n2
+	Eigen::Vector3f r1cn2 = r1.cross(n2); 	// u? 
+	float r1cn2dn1 = r1cn2.dot(n1);			// v?
 	float cos_theta1 = n2dn1;
 	float sin_theta1 = r1cn2dn1;
 	Eigen::Matrix3f rrt1 = r1 * (r1.transpose());
 	R1 = cos_theta1 * I + (1 - cos_theta1) * rrt1 + sin_theta1 * r1x;
 
+	// ### R2, rotation around n1
 	m2 = R1 * m2;
-
 	Eigen::Matrix3f R2 = Eigen::Matrix3f::Identity();
 	Eigen::Vector3f r2 = n1;
 	Eigen::Matrix3f r2x = Eigen::Matrix3f::Identity();
-	r2x(0, 0) = 0;
-	r2x(0, 1) = -r2[2];
-	r2x(0, 2) = r2[1];
-	r2x(1, 0) = r2[2];
-	r2x(1, 1) = 0;
-	r2x(1, 2) = -r2[0];
-	r2x(2, 0) = -r2[1];
-	r2x(2, 1) = r2[0];
-	r2x(2, 2) = 0;
+	r2x(0, 0) = 0;		r2x(0, 1) = -r2[2];	r2x(0, 2) = r2[1];
+	r2x(1, 0) = r2[2];	r2x(1, 1) = 0;		r2x(1, 2) = -r2[0];
+	r2x(2, 0) = -r2[1];	r2x(2, 1) = r2[0];	r2x(2, 2) = 0;
+	
 	Eigen::Matrix3f rrt2 = r2 * (r2.transpose());
 	float m2dm1 = m2.dot(m1);
 	float m2dr2 = m2.dot(r2);
@@ -778,6 +783,7 @@ void computer_transform(std::vector<Eigen::Matrix4f> &transformation_vecter, int
 	float sin_theta2 = (r2cm2dm1) / (1 - (m2dr2 * m1dr2));
 	R2 = cos_theta2 * I + (1 - cos_theta2) * rrt2 + sin_theta2 * r2x;
 
+	// Compute final rotation matrix
 	Eigen::Matrix3f rotMatrix = Eigen::Matrix3f::Identity();
 	rotMatrix = R2 * R1;
 	transformation_matrix(0, 0) = rotMatrix(0, 0);
@@ -791,15 +797,13 @@ void computer_transform(std::vector<Eigen::Matrix4f> &transformation_vecter, int
 	transformation_matrix(2, 2) = rotMatrix(2, 2);
 
 
-	// Compute the translation vector "t" Eq. (14)
-
+	// Find the third pair of planes in the source cloud to compute the translation vector
 	std::vector<face_three> face_three_vecter1;
 	Eigen::Vector3f n1cm1 = n1.cross(m1);
 	n1cm1.normalize();
 	float chose_threashold = third_plane_threshold;
 	int face1_index = 0;
 
-	// Find the third pair of planes in the source cloud to compute the translation vector
 	for (auto it1 = face_vecter1.begin(); it1 != face_vecter1.end(); it1++)
 	{
 		if ((face1_index != index11) && (face1_index != index12)) // Usa un indice que aún no se ha empleado
@@ -909,9 +913,9 @@ void computer_transform(std::vector<Eigen::Matrix4f> &transformation_vecter, int
 
 void range_cluster(std::vector<std::vector<transform_q_t>> &transform_q_t_vector_cluster)
 {
-	for (int i = 0; i < transform_q_t_vector_cluster.size(); i++)
+	for (std::size_t i = 0; i < transform_q_t_vector_cluster.size(); i++)
 	{
-		for (int j = 0; j < transform_q_t_vector_cluster.size(); j++)
+		for (std::size_t j = 0; j < transform_q_t_vector_cluster.size(); j++)
 		{
 			if (j > i)
 			{
@@ -1012,7 +1016,7 @@ void transform_cluster(std::vector<transform_q_t> &transform_q_t_vecter, std::ve
 			it1_index++;
 		}
 		range_cluster(transform_q_t_vector_cluster);
-		int clusternum = (*transform_q_t_vector_cluster.begin()).size();
+		size_t clusternum = (*transform_q_t_vector_cluster.begin()).size();
 		bool stop = false;
 
 		for (auto it1 = transform_q_t_vector_cluster.begin(); it1 != transform_q_t_vector_cluster.end(); it1++)
@@ -1169,6 +1173,26 @@ void computer_transform_guess(pcl::PointCloud<pcl::PointXYZ>::Ptr source, pcl::P
 	std::vector<facenode> face_vecter2;
 	face_extrate(cloud_tag, face_vecter2, cloud_sub2);
 
+	// ##--> Visualize the faces
+	pcl::visualization::PCLVisualizer viewer("Face Extraction");
+	viewer.setBackgroundColor(0, 0, 0);
+	int my_index = 0;
+	for (auto it1 = face_vecter1.begin(); it1 != face_vecter1.end(); it1++)
+	{
+		pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_temp new(pcl::PointCloud<pcl::PointXYZ>);
+
+		for (const auto &voxel_node : (*it1).voxelgrothnode)
+			*cloud_temp += *voxel_node.voxel_cloud_ptr;
+
+		int R = rand() % 256;
+		int G = rand() % 256;
+		int B = rand() % 256;
+
+		pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> color_handler(cloud_temp, R, G, B);
+		viewer.addPointCloud<pcl::PointXYZ>(cloud_temp, color_handler, "face1_" + std::to_integer(my_index));
+	}
+
+	// Merge similar faces
 	std::vector<face_base> base_vecter1;
 	select_base(base_vecter1, face_vecter1);
 	std::vector<face_base> base_vecter2;
@@ -1176,6 +1200,10 @@ void computer_transform_guess(pcl::PointCloud<pcl::PointXYZ>::Ptr source, pcl::P
 
 	std::vector<Eigen::Matrix4f> transformation_vecter;
 	float angelthreash = included_angle_same_threshold;
+
+	// Para todas las combinaciones de caras...
+	   // Calcula la rotacion entre todas las caras de base_vecter1 y base_vecter2
+	   // Calcula la traslacion con todas las caras distintas a base_vecter1 y base_vecter2 en la iteracion actual
 	for (auto it1 = base_vecter1.begin(); it1 != base_vecter1.end(); it1++)
 	{
 		for (auto it2 = base_vecter2.begin(); it2 != base_vecter2.end(); it2++)
@@ -1248,7 +1276,8 @@ void computer_transform_guess(pcl::PointCloud<pcl::PointXYZ>::Ptr source, pcl::P
 	int analyse_max = fine_verify_number;
 	float best_score = 0;
 	int analyse_sum = 0;
-
+	
+	// Recorre la lista de transformaciones y selecciona la mejor
 	for (auto it1 = cluster_transformation_vecter.begin(); it1 != cluster_transformation_vecter.end(); it1++)
 	{
 		if (analyse_sum < analyse_max)

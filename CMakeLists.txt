@@ -25,3 +25,6 @@ target_link_libraries (VPFBR ${CERES_LIBRARIES} ${PCL_LIBRARIES})
 
 add_executable (VPFBL VPFBL.cpp)
 target_link_libraries (VPFBL ${CERES_LIBRARIES} ${PCL_LIBRARIES})
+
+add_executable (test test.cpp)
+target_link_libraries (test ${CERES_LIBRARIES} ${PCL_LIBRARIES})
